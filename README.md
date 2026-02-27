@@ -1,10 +1,14 @@
 # Privacy-friendly CV visualization (Pose skeleton + Face mosaic)
 
-Generate a publishable MP4 from an image sequence:
+Generate a publishable gif from an image sequence:
 - Pose estimation: skeleton-only overlay
 - Face detection: mosaic anonymization
 - Offline 3-stage pipeline with JSONL cache (fast re-rendering)
 - Optional tiled inference + NMS merge
+  
+## Demo
+
+![demo](output_demo/demo.gif)
 
 ## Requirements
 - Python 3.8+
