@@ -4,19 +4,19 @@
 """
 dir_pose_to_video_with_pose_face_tiled_tmp.py
 
-指定ディレクトリ内の画像を順番に読み込み、
-A) Pose推論結果（キーポイント等）を tmp に保存（タイル分割対応）
-B) Face検出結果（顔bbox）を tmp に保存（タイル分割対応）
-C) 最後に tmp を読んでまとめて描画（骨格 + 顔モザイク）
-して、動画(mp4)を出力する。
+Reads images in a directory in order and:
+A) Runs pose inference and saves results to tmp (supports tiled inference)
+B) Runs face detection and saves results to tmp (supports tiled inference)
+C) Loads tmp results and renders the final output (skeleton overlay + face mosaic)
+   then writes an output video (mp4).
 
-ポイント
-- Pose と Face を「別実行」に分離
-- 中間結果は JSONL で tmp 保存
-- Pose / Face ともに 全体画像 + タイル分割 の両方で推論し、NMS統合
-- Pose描画は骨格のみ（人物矩形なし）
-- 顔はピクセル（マス目）モザイク
-- Pose / Face それぞれに個別の閾値設定あり
+Key points
+- Pose and Face are split into separate stages (inference vs rendering)
+- Intermediate results are cached as JSONL in tmp
+- For both Pose and Face: run full-frame + tiled inference, then merge with NMS
+- Pose rendering draws skeleton only (no person bounding boxes)
+- Faces are anonymized with pixelated mosaic
+- Pose/Face have their own independent thresholds
 """
 
 import os
@@ -32,43 +32,43 @@ from ultralytics import YOLO
 
 
 # =========================================================
-# 設定（ここだけ変える）
+# Settings (edit only here)
 # =========================================================
 INPUT_DIR = r".\MOT20\test\MOT20-04\img1"
 OUTPUT_VIDEO = "./output/pose_face_mosaic.mp4"
 
-# モデル
+# Models
 POSE_MODEL_PATH = r"weights\yolo26x-pose.pt"
 FACE_MODEL_PATH = r"weights\yolov12l-face.pt"
 
 FPS = 15.0
 DEVICE = None                  # None / "cpu" / "0"
-FOURCC = "mp4v"                # だめなら "XVID" + .avi
+FOURCC = "mp4v"                # if it fails, try "XVID" + .avi
 LINE_WIDTH = 2
 
 # -------------------------
-# Pose設定（個別）
+# Pose settings
 # -------------------------
 IMGSZ_POSE = 1280
-CONF_POSE_DET = 0.08           # Pose推論時の検知しきい値
-IOU_POSE_DET = 0.45            # Pose推論時NMS IOU（Ultralytics側）
-POSE_DRAW_KPT_THR = 0.05       # 描画時のキーポイントしきい値
-POSE_DRAW_PERSON_THR = 0.00    # 人物採用しきい値（bbox confベース、0で無効）
+CONF_POSE_DET = 0.08           # detection confidence threshold for pose inference
+IOU_POSE_DET = 0.45            # NMS IoU in Ultralytics for pose inference
+POSE_DRAW_KPT_THR = 0.05       # keypoint confidence threshold for drawing
+POSE_DRAW_PERSON_THR = 0.00    # person acceptance threshold (bbox conf); 0 disables
 
 ENABLE_TILED_POSE_DET = True
 POSE_TILE_ROWS = 4
 POSE_TILE_COLS = 4
 POSE_TILE_OVERLAP_RATIO = 0.20
-POSE_MERGE_NMS_IOU = 0.50      # 全体+タイル統合用（人物bboxベース）
-POSE_MIN_BOX_AREA = 64         # 小さすぎる人物bbox除外(px^2)
+POSE_MERGE_NMS_IOU = 0.50      # NMS IoU for merging full-frame + tiled persons (bbox-based)
+POSE_MIN_BOX_AREA = 64         # filter out too-small person boxes (px^2)
 
 # -------------------------
-# Face設定（個別）
+# Face settings
 # -------------------------
 IMGSZ_FACE = 640
 CONF_FACE_DET = 0.15
 IOU_FACE_DET = 0.25
-FACE_PAD = 0.10
+FACE_PAD = 0.10                # padding ratio around face box
 
 ENABLE_TILED_FACE_DET = True
 FACE_TILE_ROWS = 4
@@ -76,16 +76,16 @@ FACE_TILE_COLS = 4
 FACE_TILE_OVERLAP_RATIO = 0.20
 FACE_MERGE_NMS_IOU = 0.50
 
-# 顔モザイク
+# Face mosaic
 ENABLE_FACE_MOSAIC = True
-MOSAIC_BLOCK = 10              # 1マスの大きさ(px)。大きいほど粗い
+MOSAIC_BLOCK = 10              # mosaic block size (px). Larger => more pixelated
 
-# tmp（中間結果）保存先
+# tmp cache (intermediate results)
 TMP_DIR = "./temp_pose_face_cache"
 POSE_TMP_JSONL = os.path.join(TMP_DIR, "pose_results.jsonl")
 FACE_TMP_JSONL = os.path.join(TMP_DIR, "face_results.jsonl")
 
-# 描画済みフレーム保存
+# Save rendered frames (optional)
 SAVE_FRAMES = False
 FRAMES_DIR = "./output/annotated_frames"
 
@@ -102,7 +102,7 @@ COCO_KPT_CONNECTIONS = [
 
 
 # =========================================================
-# 共通ユーティリティ
+# Common utilities
 # =========================================================
 def natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
@@ -211,11 +211,11 @@ def generate_tiles(img_w, img_h, rows=2, cols=2, overlap_ratio=0.2):
 
 
 # =========================================================
-# Face（検出 + モザイク）
+# Face (detection + mosaic)
 # =========================================================
 def apply_mosaic(image, x1, y1, x2, y2, block=16):
     """
-    指定領域にピクセル（マス目）モザイク
+    Apply pixelated mosaic to the specified region.
     """
     h, w = image.shape[:2]
     x1 = int(clamp(x1, 0, w))
@@ -289,7 +289,7 @@ def get_face_boxes_from_detection(face_result, img_w, img_h, pad_ratio=0.08, off
 def detect_faces_tiled(face_model, img_bgr, img_w, img_h):
     all_boxes = []
 
-    # 全体画像
+    # Full-frame inference
     full_results = face_model.predict(
         source=img_bgr,
         conf=CONF_FACE_DET,
@@ -300,7 +300,7 @@ def detect_faces_tiled(face_model, img_bgr, img_w, img_h):
     )
     all_boxes.extend(get_face_boxes_from_detection(full_results[0], img_w, img_h, FACE_PAD, 0, 0))
 
-    # タイル分割
+    # Tiled inference
     if ENABLE_TILED_FACE_DET:
         tiles = generate_tiles(img_w, img_h, FACE_TILE_ROWS, FACE_TILE_COLS, FACE_TILE_OVERLAP_RATIO)
         for (tx1, ty1, tx2, ty2) in tiles:
@@ -324,7 +324,7 @@ def detect_faces_tiled(face_model, img_bgr, img_w, img_h):
 
 
 # =========================================================
-# Pose（推論結果の抽出 / タイル統合 / 描画）
+# Pose (extract / merge / render)
 # =========================================================
 def _safe_to_numpy(x):
     if x is None:
@@ -337,7 +337,7 @@ def _safe_to_numpy(x):
 def _pose_bbox_from_keypoints(person_kpts, kpt_thr=0.01):
     """
     person_kpts: [[x,y,conf], ...]
-    戻り値: (x1,y1,x2,y2) or None
+    Returns: (x1,y1,x2,y2) or None
     """
     pts = []
     for kp in person_kpts:
@@ -355,8 +355,9 @@ def _pose_bbox_from_keypoints(person_kpts, kpt_thr=0.01):
 
 def extract_pose_persons_from_result(pr, offset_x=0, offset_y=0):
     """
-    Ultralytics pose result -> 人物リストへ変換
-    各人物: {"kpts":[[x,y,c],...], "bbox":[x1,y1,x2,y2], "score":float}
+    Convert an Ultralytics pose result into a list of persons.
+    Each person:
+      {"kpts":[[x,y,c],...], "bbox":[x1,y1,x2,y2], "score":float}
     """
     persons = []
 
@@ -367,7 +368,7 @@ def extract_pose_persons_from_result(pr, offset_x=0, offset_y=0):
     if kpts_arr is None or kpts_arr.ndim != 3:
         return persons
 
-    # boxes.conf があれば人物scoreとして使う
+    # Use boxes.conf as a person score if available
     box_conf = None
     if hasattr(pr, "boxes") and pr.boxes is not None and getattr(pr.boxes, "conf", None) is not None:
         box_conf = _safe_to_numpy(pr.boxes.conf)
@@ -401,7 +402,7 @@ def extract_pose_persons_from_result(pr, offset_x=0, offset_y=0):
 
 def merge_pose_persons_nms(persons, iou_thr=0.5):
     """
-    Pose人物を bboxベースでNMS統合（重複人物除去）
+    Merge pose persons using bbox-based NMS (remove duplicates).
     persons: [{"kpts":..., "bbox":[...], "score":...}, ...]
     """
     if not persons:
@@ -430,12 +431,12 @@ def merge_pose_persons_nms(persons, iou_thr=0.5):
 
 def detect_pose_tiled(pose_model, img_bgr, img_w, img_h):
     """
-    全体 + タイル分割 でPose推論し、人物を統合
-    戻り値: [{"kpts":[[x,y,c],...], "bbox":[x1,y1,x2,y2], "score":...}, ...]
+    Run pose inference on full-frame + tiles, then merge persons.
+    Returns: [{"kpts":[[x,y,c],...], "bbox":[x1,y1,x2,y2], "score":...}, ...]
     """
     all_persons = []
 
-    # 全体画像
+    # Full-frame inference
     full_results = pose_model.predict(
         source=img_bgr,
         conf=CONF_POSE_DET,
@@ -446,7 +447,7 @@ def detect_pose_tiled(pose_model, img_bgr, img_w, img_h):
     )
     all_persons.extend(extract_pose_persons_from_result(full_results[0], 0, 0))
 
-    # タイル分割
+    # Tiled inference
     if ENABLE_TILED_POSE_DET:
         tiles = generate_tiles(img_w, img_h, POSE_TILE_ROWS, POSE_TILE_COLS, POSE_TILE_OVERLAP_RATIO)
         for (tx1, ty1, tx2, ty2) in tiles:
@@ -466,7 +467,7 @@ def detect_pose_tiled(pose_model, img_bgr, img_w, img_h):
 
     merged = merge_pose_persons_nms(all_persons, POSE_MERGE_NMS_IOU)
 
-    # 座標を画角内に丸める
+    # Clamp coordinates into the image bounds
     for p in merged:
         for kp in p["kpts"]:
             kp[0] = float(clamp(kp[0], 0, img_w - 1))
@@ -484,7 +485,7 @@ def detect_pose_tiled(pose_model, img_bgr, img_w, img_h):
 
 def serialize_pose_persons(persons):
     """
-    JSON保存用
+    Serialize pose persons for JSON saving.
     """
     out = {"persons": []}
     for p in persons:
@@ -498,12 +499,12 @@ def serialize_pose_persons(persons):
 
 def draw_pose_only(frame_bgr, pose_cache, line_width=2, kpt_thr=0.05):
     """
-    tmpのpose結果から骨格のみ描画（矩形なし）
+    Draw skeleton only from cached pose results (no bounding boxes).
     """
     if not pose_cache or "persons" not in pose_cache:
         return frame_bgr
 
-    # 線を先に
+    # Draw lines first
     for person in pose_cache["persons"]:
         kpts = person.get("kpts", [])
         n = len(kpts)
@@ -518,7 +519,7 @@ def draw_pose_only(frame_bgr, pose_cache, line_width=2, kpt_thr=0.05):
             pt2 = (int(round(xb)), int(round(yb)))
             cv2.line(frame_bgr, pt1, pt2, (0, 255, 0), line_width, cv2.LINE_AA)
 
-    # 点
+    # Draw keypoints
     radius = max(2, line_width + 1)
     for person in pose_cache["persons"]:
         kpts = person.get("kpts", [])
@@ -537,7 +538,7 @@ def draw_pose_only(frame_bgr, pose_cache, line_width=2, kpt_thr=0.05):
 # Stage 1: Pose -> tmp
 # =========================================================
 def stage1_run_pose_and_save(image_files, width, height):
-    print("[STAGE 1/3] Pose推論(全体+タイル) -> tmp保存")
+    print("[STAGE 1/3] Pose inference (full + tiles) -> tmp cache")
     pose_model = YOLO(POSE_MODEL_PATH)
     rows = []
 
@@ -568,7 +569,7 @@ def stage1_run_pose_and_save(image_files, width, height):
 # Stage 2: Face -> tmp
 # =========================================================
 def stage2_run_face_and_save(image_files, width, height):
-    print("[STAGE 2/3] Face検出(全体+タイル) -> tmp保存")
+    print("[STAGE 2/3] Face detection (full + tiles) -> tmp cache")
 
     try:
         face_model = YOLO(FACE_MODEL_PATH)
@@ -613,7 +614,7 @@ def stage2_run_face_and_save(image_files, width, height):
 # Stage 3: tmp -> render
 # =========================================================
 def stage3_render_from_tmp(image_files, width, height):
-    print("[STAGE 3/3] tmp読込 -> 最終描画/動画保存")
+    print("[STAGE 3/3] Load tmp -> render and write video")
 
     ensure_parent_dir(OUTPUT_VIDEO)
     if SAVE_FRAMES:
@@ -647,7 +648,7 @@ def stage3_render_from_tmp(image_files, width, height):
         try:
             frame_out = img.copy()
 
-            # Pose描画（矩形なし）
+            # Pose rendering (no boxes)
             pose_row = pose_map.get(i, {})
             frame_out = draw_pose_only(
                 frame_out,
@@ -656,7 +657,7 @@ def stage3_render_from_tmp(image_files, width, height):
                 kpt_thr=POSE_DRAW_KPT_THR
             )
 
-            # 顔モザイク（矩形なし）
+            # Face mosaic (no boxes)
             if ENABLE_FACE_MOSAIC:
                 face_row = face_map.get(i, {})
                 for fb in face_row.get("faces", []):
@@ -712,13 +713,13 @@ def main():
     print("[INFO] Frame size: {}x{}".format(width, height))
     print("[INFO] tmp dir: {}".format(TMP_DIR))
 
-    # 1) Pose推論 -> tmp
+    # 1) Pose inference -> tmp
     stage1_run_pose_and_save(image_files, width, height)
 
-    # 2) Face検出 -> tmp
+    # 2) Face detection -> tmp
     stage2_run_face_and_save(image_files, width, height)
 
-    # 3) tmp読込 -> 描画して動画化
+    # 3) Load tmp -> render -> write video
     stage3_render_from_tmp(image_files, width, height)
 
 
