@@ -1,0 +1,23 @@
+# model weights / binaries
+weights/
+*.pt
+*.onnx
+*.engine
+*.tflite
+
+# outputs / caches
+output/
+temp_pose_face_cache/
+temp*/
+*.mp4
+*.avi
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
