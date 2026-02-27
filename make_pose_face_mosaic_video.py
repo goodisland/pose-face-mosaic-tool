@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-dir_pose_to_video_with_pose_face_tiled_tmp.py
+make_pose_face_mosaic_video.py
 
 Reads images in a directory in order and:
 A) Runs pose inference and saves results to tmp (supports tiled inference)
